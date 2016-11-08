@@ -154,8 +154,11 @@ if __name__ == '__main__':
     parser.add_argument('--cluster')
     args = parser.parse_args()
 
-    raftos.register(args.node, cluster=args.cluster.split())
-    beatle = Beatle(config_path=args.conf, beatle_id=args.node)
+    cluster = ['127.0.0.1:{}'.format(port) for port in args.cluster.split()]
+    node = '127.0.0.1:{}'.format(args.node)
+
+    raftos.register(node, cluster=cluster)
+    beatle = Beatle(config_path=args.conf, beatle_id=node)
 
     loop = asyncio.get_event_loop()
     loop.run_until_complete(beatle.run())

@@ -15,7 +15,11 @@ KEY: <secret key>
 
 #### Start
 ```bash
-docker run -d beatle --conf="/etc/beatle/default.conf" --node="8000" --cluster="8000 8001 8002"
-docker run -d beatle --conf="/etc/beatle/default.conf" --node="8001" --cluster="8000 8001 8002"
-docker run -d beatle --conf="/etc/beatle/default.conf" --node="8002" --cluster="8000 8001 8002"
+# pure
+python3 beatle.py --conf="/etc/beatle/default.conf" --node="8000" --cluster="8000 8001 8002" &
+...
+
+# with docker (not working)
+docker run --net=host -it zhebrak/beatle --conf="/etc/beatle/default.conf" --node="8000" --cluster="8000 8001 8002"
+...
 ```
