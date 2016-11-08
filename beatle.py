@@ -1,8 +1,10 @@
 import aiohttp
+import argparse
 import asyncio
 import hmac
 import logging
 import os
+import raftos
 
 from configparser import ConfigParser, NoSectionError, NoOptionError
 from datetime import datetime, timedelta
@@ -14,11 +16,8 @@ from crontab import CronTab
 logger = logging.getLogger('beatle')
 
 
-BEATLE_DEFAULT_CONFIGURATION = {
-    'LOOP_TIMEOUT': 10
-}
-
-PROJECT_DEFAULT_CONFIGURATION = {
+DEFAULT_CONFIGURATION = {
+    'LOOP_TIMEOUT': 10,
     'UPDATE_EVERY': 600,
     'TIMEOUT': 5,
     'TIME_ZONE': 'Europe/Moscow'
@@ -26,7 +25,8 @@ PROJECT_DEFAULT_CONFIGURATION = {
 
 
 class Beatle:
-    def __init__(self, config_path):
+    def __init__(self, config_path, beatle_id):
+        self.id = beatle_id
         self.read_config(config_path)
         self.init_logger()
 
@@ -44,21 +44,20 @@ class Beatle:
 
         self.projects = []
         for section in self.config.sections():
-            if section not in {'beatle', 'default'}:
-                configuration = BEATLE_DEFAULT_CONFIGURATION.copy()
-                configuration.update(PROJECT_DEFAULT_CONFIGURATION)
+            if section != 'beatle':
+                configuration = DEFAULT_CONFIGURATION.copy()
                 configuration.update({
                     'NAME': section,
                     'KEY': self.config_get(section, 'KEY'),
                     'URL': self.config_get(section, 'URL'),
 
-                    'UPDATE_EVERY': self.config_get('default', 'UPDATE_EVERY', 600),
-                    'TIMEOUT': self.config_get('default', 'TIMEOUT', 5),
-                    'TIME_ZONE': self.config_get('default', 'TIME_ZONE', 'Europe/Moscow'),
+                    'UPDATE_EVERY': self.config_get('beatle', 'UPDATE_EVERY', 600),
+                    'TIMEOUT': self.config_get('beatle', 'TIMEOUT', 5),
+                    'TIME_ZONE': self.config_get('beatle', 'TIME_ZONE', 'Europe/Moscow'),
 
                     'LOOP_TIMEOUT': self.loop_timeout,
                 })
-                self.projects.append(Project(configuration))
+                self.projects.append(Project(self, configuration))
 
     def init_logger(self):
         logger.setLevel(logging.DEBUG)
@@ -67,17 +66,21 @@ class Beatle:
         handler = SysLogHandler(facility=getattr(SysLogHandler, facility))
         logger.addHandler(handler)
 
-    async def run(self, loop):
+    async def run(self):
         """Run event loop"""
+        loop = asyncio.get_event_loop()
         while True:
-            for project in self.projects:
-                loop.create_task(project.call())
+            if isinstance(raftos.get_leader(), raftos.state.Leader):
+                for project in self.projects:
+                    loop.create_task(project.call())
 
             await asyncio.sleep(self.loop_timeout)
 
 
 class Project:
-    def __init__(self, configuration):
+    def __init__(self, beatle, configuration):
+        self.beatle = beatle
+
         self.name = configuration.get('NAME')
         self.key = configuration.get('KEY')
         self.url = configuration.get('URL')
@@ -124,15 +127,8 @@ class Project:
             task_name for cron, task_name in self.tasks.items()
             if cron.next() < self.loop_timeout
         ]
-
-        print([(task_name, cron.next()) for cron, task_name in self.tasks.items()])
-        print(self.config)
-
         if task_list:
-            print('{}: {}\n'.format(self.name, ', '.join(task_list)))
-
-            params = {'TASKS': task_list}
-            return await self._request('post', params=params)
+            return await self._request('post', params={'TASKS': task_list})
 
     async def _request(self, method, params=None):
         if params is None:
@@ -152,8 +148,15 @@ class Project:
 
 
 if __name__ == '__main__':
-    beatle = Beatle(config_path='default.conf')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--conf')
+    parser.add_argument('--node')
+    parser.add_argument('--cluster')
+    args = parser.parse_args()
+
+    raftos.register(args.node, cluster=args.cluster.split())
+    beatle = Beatle(config_path=args.conf, beatle_id=args.node)
 
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(beatle.run(loop))
+    loop.run_until_complete(beatle.run())
     loop.close()
