@@ -70,7 +70,7 @@ class Beatle:
         """Run event loop"""
         loop = asyncio.get_event_loop()
         while True:
-            if isinstance(raftos.get_leader(), raftos.state.Leader):
+            if raftos.get_leader() == self.id:
                 for project in self.projects:
                     loop.create_task(project.call())
 
@@ -114,9 +114,10 @@ class Project:
             self.last_update = datetime.now()
 
     def config_have_to_be_updated(self):
-        return not (
-            self.last_update and self.last_update > datetime.now() - timedelta(self.update_every)
-        )
+        if self.last_update is None:
+            return True
+
+        return self.last_update < datetime.now() - timedelta(self.update_every)
 
     async def call(self):
         """POST to HTTP endpoint if needed"""
