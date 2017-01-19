@@ -1,10 +1,12 @@
 import aiohttp
 import argparse
 import asyncio
+import functools
+import json
 import hmac
 import logging
-import os
 import raftos
+import time
 
 from configparser import ConfigParser, NoSectionError, NoOptionError
 from datetime import datetime, timedelta
@@ -13,6 +15,11 @@ from logging.handlers import SysLogHandler
 from crontab import CronTab
 
 
+logging.basicConfig(
+    filename='/var/log/beatle/beatle.log',
+    format="[%(asctime)s] %(levelname)s %(message)s",
+    level=logging.INFO
+)
 logger = logging.getLogger('beatle')
 
 
@@ -55,7 +62,7 @@ class Beatle:
                     'TIMEOUT': self.config_get('beatle', 'TIMEOUT', 5),
                     'TIME_ZONE': self.config_get('beatle', 'TIME_ZONE', 'Europe/Moscow'),
 
-                    'LOOP_TIMEOUT': self.loop_timeout,
+                    'LOOP_TIMEOUT': self.loop_timeout
                 })
                 self.projects.append(Project(self, configuration))
 
@@ -66,13 +73,17 @@ class Beatle:
         handler = SysLogHandler(facility=getattr(SysLogHandler, facility))
         logger.addHandler(handler)
 
+    def on_leader(self):
+        logger.info('{} is leader'.format(self.id))
+
     async def run(self):
         """Run event loop"""
         loop = asyncio.get_event_loop()
         while True:
-            if raftos.get_leader() == self.id:
-                for project in self.projects:
-                    loop.create_task(project.call())
+            await raftos.wait_until_leader(self.id)
+
+            for project in self.projects:
+                asyncio.ensure_future(project.call())
 
             await asyncio.sleep(self.loop_timeout)
 
@@ -103,7 +114,7 @@ class Project:
             self.config = await self._request('get') or self.config or {}
 
             self.tasks = {
-                CronTab(cron_string): task
+                task: CronTab(cron_string)
                 for task, cron_string in self.config.get('TASKS', {}).items()
             }
 
@@ -113,6 +124,7 @@ class Project:
 
             self.last_update = datetime.now()
 
+    @property
     def config_have_to_be_updated(self):
         if self.last_update is None:
             return True
@@ -124,26 +136,53 @@ class Project:
 
         await self.get_config()
 
-        task_list = [
-            task_name for cron, task_name in self.tasks.items()
-            if cron.next() < self.loop_timeout
-        ]
-        if task_list:
-            return await self._request('post', params={'TASKS': task_list})
+        for task_name, cron in self.tasks.items():
+            time_left = cron.next()
+            if time_left < self.loop_timeout:
+                asyncio.ensure_future(
+                    self._call_later(
+                        time_left,
+                        self._request('post', data={'TASK': task_name})
+                    )
+                )
 
-    async def _request(self, method, params=None):
+    @staticmethod
+    async def _call_later(time_left, coroutine):
+        await asyncio.sleep(time_left)
+        await coroutine
+
+    async def _request(self, method, data=None, params=None):
         if params is None:
             params = {}
-        params.update({'SIGNATURE': self._get_signature(params)})
 
-        request = getattr(aiohttp, method)
-        with aiohttp.Timeout(self.timeout):
-            async with request(self.url, params=params) as r:
-                if r.status != 200:
-                    return
-                return await r.json()
+        params.update({'SIGNATURE': self._get_signature(data)})
 
-    def _get_signature(self, params):
+        start = time.time()
+        result = None
+
+        async with aiohttp.ClientSession() as session:
+            request = getattr(session, method)
+            async with request(self.url, data=data, params=params, timeout=self.timeout) as r:
+                if r.status == 200:
+                    result = await r.json()
+
+        log_map = {
+            'URL': self.url,
+            'Data': json.dumps(data),
+            'Time': str(time.time() - start),
+            'Status': str(r.status),
+            'Response': json.dumps(result)
+        }
+
+        message = '\n'.join([': '.join([key, value]) for key, value in log_map.items()])
+        logger.info('\n' + message + '\n')
+
+        return result
+
+    def _get_signature(self, params=None):
+        if params is None:
+            params = {}
+
         msg = ''.join(map(str, sorted(params.values()))).encode()
         return hmac.new(self.key.encode(), msg=msg).hexdigest()
 
@@ -158,9 +197,14 @@ if __name__ == '__main__':
     cluster = ['127.0.0.1:{}'.format(port) for port in args.cluster.split()]
     node = '127.0.0.1:{}'.format(args.node)
 
-    raftos.register(node, cluster=cluster)
     beatle = Beatle(config_path=args.conf, beatle_id=node)
+    logger.info('Starting beatle node: {}'.format(node))
 
     loop = asyncio.get_event_loop()
+    loop.create_task(raftos.register(node, cluster=cluster))
+    raftos.configure({
+        'log_path': '/var/log/beatle/',
+        'serializer': raftos.serializers.JSONSerializer,
+        'on_leader': beatle.on_leader
+    })
     loop.run_until_complete(beatle.run())
-    loop.close()
