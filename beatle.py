@@ -5,6 +5,7 @@ import functools
 import json
 import hmac
 import logging
+import pytz
 import raftos
 import time
 
@@ -125,6 +126,15 @@ class Project:
             self.last_update = datetime.now()
 
     @property
+    def timezone_aware_now(self):
+        try:
+            return datetime.now(pytz.timezone(self.timezone))
+        except pytz.exceptions.UnknownTimeZoneError:
+            logger.exception('Wrong timezone provided for {}'.format(self.name))
+        finally:
+            return datetime.now()
+
+    @property
     def config_have_to_be_updated(self):
         if self.last_update is None:
             return True
@@ -137,7 +147,7 @@ class Project:
         await self.get_config()
 
         for task_name, cron in self.tasks.items():
-            time_left = cron.next()
+            time_left = cron.next(now=self.timezone_aware_now)
             if time_left < self.loop_timeout:
                 asyncio.ensure_future(
                     self._call_later(

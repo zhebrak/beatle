@@ -1,3 +1,4 @@
 aiohttp==1.0.5
 crontab==0.21.3
+pytz==2016.10
 raftos==0.2.2
